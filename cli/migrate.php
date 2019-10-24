@@ -231,7 +231,7 @@ class dbmigrate_migrate extends cli_interface {
     function print_summary() {
         global $DB;
         echo "\n\nSUMÁRIO\n";
-        echo "  Total de tabelas no Moolde: " . count($DB->get_tables()) . "\n";
+        echo "  Total de tabelas no Moodle: " . count($DB->get_tables()) . "\n";
         echo "  Total de tabelas a migrar: " . count($this->tables_metas) . "\n";
         echo "  Total de tabelas já existentes: " . count($this->tables_on_target) . "\n";
         echo "  Total de tabelas a criar: " . (count($this->tables_metas) - count($this->tables_on_target)) . "\n";
