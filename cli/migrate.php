@@ -35,7 +35,7 @@ class cli_interface {
         }
         $help = $this->help;
         
-        if ($this->get_option_args() > 0) {
+        if ($this->get_option_args() == 0) {
             return $help;
         }
 
@@ -129,8 +129,6 @@ class dbmigrate_migrate extends cli_interface {
                 "dbpass"=>['value'=> 'PASSWORD', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database password.'],
                 "maintenance"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Put Moodle on maintenance during migration.'],
                 "force"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Force migration if tables already exists.'],
-                "help"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Print this page.'],
-                "version"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Print version number.']
             ], 
             parent::get_option_args());
     }
