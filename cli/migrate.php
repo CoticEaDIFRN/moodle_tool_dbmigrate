@@ -1,30 +1,10 @@
 <?php
-// This file is part of Moodle - http://moodle.org/
-//
-// Moodle is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// Moodle is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
-
 /**
  * This script migrates data from current database to another
  *
- * This script is not intended for beginners!
- * Potential problems:
- * - su to apache account or sudo before execution
- * - already broken DB scheme or invalid data
- *
  * @package    tool_dbmigrate
- * @copyright  2012 Petr Skoda {@link http://skodak.org/}
- * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ * @copyright  2019 Kelson Medeiros {@link https://github.com/kelsoncm}
+ * @license    https://opensource.org/licenses/MIT The MIT License
  */
 
 define('CLI_SCRIPT', true);
@@ -33,155 +13,140 @@ require(__DIR__.'/../../../../config.php');
 require_once($CFG->libdir.'/clilib.php');
 require_once(__DIR__.'/../locallib.php');
 
-$help = "Database migration script.
-
-It is strongly recommended to turn off the web server
-or enable CLI maintenance mode before starting the migration.
-
-Options:
---dbtype=TYPE         Database type.
---dblibrary=TYPE      Database library. Defaults to 'native'.
---dbhost=HOST         Database host.
---dbname=NAME         Database name.
---dbuser=USERNAME     Database user.
---dbpass=PASSWORD     Database password.
---dbport=NUMBER       Database port.
---prefix=STRING       Table prefix for above database tables.
---dbsocket=PATH       Use database sockets. Available for some databases only.
--h, --help            Print out this help.
-
-Example:
-\$ sudo -u www-data /usr/bin/php admin/tool/dbmigrate/cli/migrate.php\n";
 $tput_cols = intval(exec('tput cols'));
 
-function cli_progress_bar($progress, $total, $info="", $width=50) {
-    global $tput_cols;
-    $perc = round(($progress * 100) / $total);
-    $bar = round(($width * $perc) / 100);
-    $pb = sprintf("%s%%[%s>%s]", $perc, str_repeat("=", $bar), str_repeat(" ", $width-$bar));
-    $info_p = str_pad($info, $tput_cols-strlen($pb)-4, ' ');
-    return "$pb$info_p\r";
+class cli_interface {
+
+    protected $help = null;
+    protected $version = null;
+
+    function cli_progress_bar($progress, $total, $info="", $width=50) {
+        global $tput_cols;
+        $perc = round(($progress * 100) / $total);
+        $bar = round(($width * $perc) / 100);
+        $pb = sprintf("%s%%[%s>%s]", $perc, str_repeat("=", $bar), str_repeat(" ", $width-$bar));
+        $info_p = str_pad($info, $tput_cols-strlen($pb)-4, ' ');
+        return "$pb$info_p\r";
+    }
+    
+    function get_help() {
+        if (empty($this->help)) {
+            return "No help to you.";
+        }
+        $help = $this->help;
+        
+        if ($this->get_option_args() > 0) {
+            return $help;
+        }
+
+        $help .= "\nOptions:\n";
+        $len = 0;
+        foreach ($this->get_option_args() as $option => $configs) {
+            $pading_option = $option . (array_key_exists('value', $configs) ? "={$configs['value']}" : '');
+            $len = strlen($pading_option) > $len ? strlen($pading_option) : $len;
+        }
+        foreach ($this->get_option_args() as $option => $configs) {
+            $pading_option = str_pad($option . (array_key_exists('value', $configs) ? "={$configs['value']}" : ''), $len, " ");
+            $option_help = array_key_exists('help', $configs) ? $configs['help'] : 'No help to you today.';
+            $choices = array_key_exists('choices', $configs) ? 'Choices are: '. implode(', ', $configs['choices']) . '.' : '';
+            $default = array_key_exists('default', $configs) && !empty($configs['default']) ? "Default are {$configs['default']}." : '';
+            $help .= "   --$pading_option $option_help $choices$default\n";
+        }
+        $help .= '';
+        return  $help;
+    }
+
+    function get_version() {
+        return $this->version ? $this->version : 'Moodle version: ' . get_config('', 'version') . "\n";
+    }
+
+    public function get_option_args() {
+        return [
+            "help"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Print this page and exit.'],
+            "version"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Print version number and exit.'],
+        ];
+    }
+
+    function read_options() {
+        $options_to_read = [];
+        foreach ($this->get_option_args() as $option => $configs) {
+            $options_to_read[$option] = array_key_exists('default', $configs) ? $configs['default'] : null;
+        }
+        list($options, $unrecognized) = cli_get_params($options_to_read, []);
+
+        if ($options['help']) {
+            echo $this->get_help();
+            exit(0);
+        }
+
+        if ($options['version']) {
+            echo $this->get_version();
+            exit(0);
+        }
+
+        foreach ($this->get_option_args() as $option => $configs) {
+            if ( !isset($options[$option]) && array_key_exists('value', $configs) && !empty($configs['value'])) {
+                $label = array_key_exists('label', $configs) && !empty($configs['label']) ? get_string($configs['label'][0], $configs['label'][1]) : "Type $option";
+                $choices = array_key_exists('choices', $configs) && !empty($configs['choices']) ? $configs['choices'] : null;
+                $default = array_key_exists('default', $configs) && !empty($configs['default']) ? $configs['default'] : null;
+                $options[$option] = cli_input($label, $default, $choices, !empty($choices));
+            }
+        }
+    }
 }
 
-class dbmigrate_migrate {
+
+class dbmigrate_migrate extends cli_interface {
     protected $targetdb = null;
     protected $tables_metas = null;
     protected $tables_on_target = [];
     protected $table_count = 0;
     protected $total_rows = 0;
     protected $options = null;
-    protected $page_size = 1000;
-    protected $exclude = ['course_modules_completion', 'files', 'analytics_indicator_calc', 'logstore_standard_log', 
-                          'game_cross', 'game_cryptex', 'game_hangman', 'game_millionaire', 
-                          'grade_grades', 'notifications', 'message_read', 
-                          'question_attempt_step_data', 'question_attempt_steps', 'stats_daily'];
-    protected $only_tables = null;
-    // protected $only_tables = ['block_positions'];
+    protected $page_size = 1;
+    // protected $exclude = ['files', 'analytics_indicator_calc', 'logstore_standard_log', 
+    //                       'game_cross', 'game_cryptex', 'game_hangman', 'game_millionaire', 
+    //                       'grade_grades', 'notifications', 'message_read', 
+    //                       'question_attempt_step_data', 'question_attempt_steps', 'stats_daily'];
+    // protected $exclude = ['analytics_indicator_calc', 'logstore_standard_log', 
+    //                       'game_cross', 'game_cryptex', 'game_hangman', 'game_millionaire'];
+    protected $exclude = [];
+    // protected $only_tables = null;
+    protected $only_tables = ['game', 'game_cross'];
     protected $only_first = false;
 
-    function get_options() {
-        global $CFG, $DB, $help;
+    protected $help = "New Moodle database migration script.\n\nIt is strongly recommended to turn off the web server\n or enable CLI maintenance mode before starting the migration.\n\nExample:\n\$ sudo -u www-data /usr/bin/php admin/tool/dbmigrate/cli/migrate.php\n\n";
+    
+    public function get_option_args() {
+        return array_merge(
+            [
+                "prefix"=>['value'=>'PREFIX', 'label'=>['choose_dbconnector', 'dbmigrate'], 'default'=>'mdl_', 'help'=> 'Table prefix for above database tables.'],
+                "dbconnector"=>['value'=> 'CONNECTOR', 'label'=>['dbconnector', 'dbmigrate'], 'default'=>null, 'choices'=> $this->get_drivers(), 'help'=> 'Database type/library.'],
+                "dbhost"=>['value'=> 'HOST', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database host.'],
+                "dbport"=>['value'=> 'PORT', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database port.'],
+                "dbname"=>['value'=> 'DATABASE', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database name.'],
+                "dbuser"=>['value'=> 'USERNAME', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database user.'],
+                "dbpass"=>['value'=> 'PASSWORD', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database password.'],
+                "maintenance"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Put Moodle on maintenance during migration.'],
+                "force"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Force migration if tables already exists.'],
+                "help"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Print this page.'],
+                "version"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Print version number.']
+            ], 
+            parent::get_option_args());
+    }
 
-        // Now get cli options.
-        list($options, $unrecognized) = cli_get_params(
-            array(
-                'dbtype'            => null,
-                'dblibrary'         => 'native',
-                'dbhost'            => null,
-                'dbport'            => null,
-                'dbname'            => null,
-                'dbuser'            => null,
-                'dbpass'            => null,
-                'prefix'            => null,
-                'dbsocket'          => null,
-                'maintenance'       => null,
-                'list'              => false,
-                'help'              => false,
-                'force'             => false,
-            ),
-            array(
-                'm' => 'maintenance',
-                'l' => 'list',
-                'h' => 'help',
-            )
-        );
-    
-        if ($options['help']) {
-            echo $help;
-            exit(0);
-        }
-    
-        if (empty($CFG->version)) {
-            cli_error(get_string('missingconfigversion', 'debug'));
-        }
-    
-        $drivers = tool_dbmigrate_get_drivers();
-    
-        if (!isset($options['dbtype'])) {
-            $choose = array();
-            foreach ($drivers as $driver => $name) {
-                list($dbtype, $dblibrary) = explode('/', $driver);
-                $choose[$dbtype] = $dbtype;
-            }
-            $optionsstr = implode(', ', $choose);
-            cli_heading(get_string('databasetypehead', 'install')." ($optionsstr)");
-            $options['dbtype'] = cli_input(get_string('clitypevalue', 'admin'), '', $choose, true);
-        }
-    
+    private function get_drivers() {
+        $drives = tool_dbmigrate_get_drivers();
         $choose = array();
-        foreach ($drivers as $driver => $name) {
-            list($dbtype, $dblibrary) = explode('/', $driver);
-            if ($dbtype === $options['dbtype']) {
-                $choose[$dblibrary] = $dblibrary;
-            }
+        foreach ($drives as $driver => $name) {
+            // list($dbtype, $dblibrary) = explode('/', $driver);
+            array_push($choose, $driver);
         }
-        if (!isset($options['dblibrary']) or !isset($choose[$options['dblibrary']])) {
-            $optionsstr = implode(', ', $choose);
-            cli_heading('Database library'." ($optionsstr)"); // Note: no need to localise unless we add real PDO drivers.
-            $options['dblibrary'] = cli_input(get_string('clitypevalue', 'admin'), '', $choose, true);
-        }
-    
-        if (!isset($options['dbhost'])) {
-            cli_heading(get_string('databasehost', 'install'));
-            $options['dbhost'] = cli_input(get_string('clitypevalue', 'admin'));
-        }
-    
-        if (!isset($options['dbport'])) {
-            cli_heading(get_string('dbport', 'install'));
-            $options['dbport'] = cli_input(get_string('clitypevalue', 'admin'));
-        }
-    
-        if (!isset($options['dbname'])) {
-            cli_heading(get_string('databasename', 'install'));
-            $options['dbname'] = cli_input(get_string('clitypevalue', 'admin'));
-        }
-    
-        if (!isset($options['dbuser'])) {
-            cli_heading(get_string('databaseuser', 'install'));
-            $options['dbuser'] = cli_input(get_string('clitypevalue', 'admin'));
-        }
-    
-        if (!isset($options['dbpass'])) {
-            cli_heading(get_string('databasepass', 'install'));
-            $options['dbpass'] = cli_input(get_string('clitypevalue', 'admin'));
-        }
-    
-        if (!isset($options['prefix'])) {
-            cli_heading(get_string('dbprefix', 'install'));
-            $options['prefix'] = cli_input(get_string('clitypevalue', 'admin'));
-        }
-    
-        if ($CFG->ostype !== 'WINDOWS') {
-            if (!isset($options['dbsocket'])) {
-                cli_heading(get_string('databasesocket', 'install'));
-                $options['dbsocket'] = cli_input(get_string('clitypevalue', 'admin'));
-            }
-        }
-        $this->options = $options;
+
+        return $choose;
     }
 
     function check_connection() {
-        // Try target DB connection.    
         $this->targetdb = moodle_database::get_driver_instance($this->options['dbtype'], $this->options['dblibrary']);
         $options = $this->options;
         $dboptions = array();
@@ -192,6 +157,7 @@ class dbmigrate_migrate {
             $dboptions['dbsocket'] = $this->options['dbsocket'];
         }
         try {
+            $dboptions['bulkinsertsize'] = $this->page_size;
             $this->targetdb->connect($options['dbhost'], $options['dbuser'], $options['dbpass'], $options['dbname'], $options['prefix'], $dboptions);
             $this->target_tables = $this->targetdb->get_tables();
         } catch (moodle_exception $e) {
@@ -241,7 +207,7 @@ class dbmigrate_migrate {
                 if ( in_array($table_name, $this->exclude)) {
                     continue;
                 } 
-                echo "  " . cli_progress_bar($i, $this->table_count, " $i/{$this->table_count}");
+                echo "  " . $this->cli_progress_bar($i, $this->table_count, " $i/{$this->table_count}");
                 
                 $full_table_name = $DB->get_prefix() . $table_name;
                 $count_records = $DB->count_records($table_name);
@@ -285,7 +251,7 @@ class dbmigrate_migrate {
         echo "CRIANDO AS TABELAS\n";
         foreach ($this->get_tables_metas() as $table_name => $table_meta) {
             $i++;
-            echo "  " . cli_progress_bar($i, $this->table_count, " {$table_name} ($i de $this->table_count)");
+            echo "  " . $this->cli_progress_bar($i, $this->table_count, " {$table_name} ($i de $this->table_count)");
 
             if (in_array($table_name, $this->tables_on_target)) {
                 $this->targetdb->execute("TRUNCATE TABLE {$table_meta['full_table_name']}");
@@ -331,7 +297,11 @@ class dbmigrate_migrate {
                         switch (strtolower($column->data_type)) {
                             case 'varchar':
                             case 'longtext':
-                                $table_struc .= "'{$column->column_default}'";
+                                if (substr($column->column_default, 0, 1) == "'") {
+                                    $table_struc .= $column->column_default;
+                                } else {
+                                    $table_struc .= "'{$column->column_default}'";
+                                }
                                 break;
                             default:
                                 $table_struc .= $column->column_default;
@@ -352,7 +322,7 @@ class dbmigrate_migrate {
                 }
             }
         }
-        echo "  " . cli_progress_bar($this->table_count, $this->table_count, " Criadas ($i de $this->table_count).") . "\n";
+        echo "  " . $this->cli_progress_bar($this->table_count, $this->table_count, " Criadas ($i de $this->table_count).") . "\n";
     }
 
     function insert_rows() {
@@ -365,14 +335,27 @@ class dbmigrate_migrate {
             $p = round(($t * 100) / $tt);
             $row_count_f = number_format($table_meta['row_count'], 0, "", ".");
             for ($j=0; $j<=$table_meta['row_count']; $j+=$this->page_size) { 
-                echo "    " . cli_progress_bar($j, $table_meta['row_count'], " $table_name ($p% - $t de $tt). Linhas ($migrated_in_table_f de $row_count_f)");
+                echo "    " . $this->cli_progress_bar($j, $table_meta['row_count'], " $table_name ($p% - $t de $tt). Linhas ($migrated_in_table_f de $row_count_f)");
                 $migrated_in_table_f = number_format($j, 0, "", ".");
-                $rs = $DB->get_recordset($table_name, null, '', '*', $j+1, $this->page_size);
+
+                // $rs = $DB->get_recordset_sql("SELECT * FROM {$table_meta['full_table_name']} ORDER BY id", null, $j+1, $this->page_size);
+                // foreach ($rs as $id => $obj) {
+                //     print_r($obj);
+                // }
+                // $this->targetdb->insert_records($table_name, $rs);
+                // $rs->close();
+
+                // print_r($table_meta['columns']);
+                // die();
+
+                $rs = $DB->get_recordset_sql("SELECT * FROM {$table_meta['full_table_name']} ORDER BY id", null, $j+1, $this->page_size);
                 $this->targetdb->insert_records($table_name, $rs);
+                // $this->targetdb->insert_chunk($table_name, $rs);
+                die();
                 $rs->close();
             }
         }
-        echo "  " . cli_progress_bar($tt, $tt, " Inseridas ($t de $tt)."). "\n";
+        echo "  " . $this->cli_progress_bar($tt, $tt, " Inseridas ($t de $tt)."). "\n";
     }
     
     function reset_sequences() {
@@ -392,21 +375,24 @@ class dbmigrate_migrate {
             $i++;
             $sequence_name = substr($column->column_default, 9, -12);
             $this->targetdb->execute("SELECT setval('$sequence_name', (select MAX({$column->column_name})+1 qtd from {$column->table_name}))");
-            echo "    " . cli_progress_bar($i, $tt, " $sequence_name ($i de $tt)");
+            echo "    " . $this->cli_progress_bar($i, $tt, " $sequence_name ($i de $tt)");
         }
-        echo "  " . cli_progress_bar($i, $tt, " Redefinidas ($i de $tt)."). "\n";
+        echo "  " . $this->cli_progress_bar($i, $tt, " Redefinidas ($i de $tt)."). "\n";
     }
 
     function migrate() {
-        global $DB;
-        $this->get_options();
-        $this->check_connection();
-        $this->get_tables_metas();
-        $this->print_summary();
-        $this->create_tables();
-        $this->insert_rows();
-        // $this->reset_sequences();
-        echo "\n";
+        try {
+            $this->read_options();
+            $this->check_connection();
+            $this->get_tables_metas();
+            $this->print_summary();
+            $this->create_tables();
+            $this->insert_rows();
+            $this->reset_sequences();
+            echo "\n";
+        } catch (Exception $e) {
+            print_r($e);
+        }
     }
 }
 
