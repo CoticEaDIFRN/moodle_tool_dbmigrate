@@ -89,9 +89,11 @@ class cli_interface {
                 $label = array_key_exists('label', $configs) && !empty($configs['label']) ? get_string($configs['label'][0], $configs['label'][1]) : "Type $option";
                 $choices = array_key_exists('choices', $configs) && !empty($configs['choices']) ? $configs['choices'] : null;
                 $default = array_key_exists('default', $configs) && !empty($configs['default']) ? $configs['default'] : null;
-                $options[$option] = cli_input($label, $default, $choices, !empty($choices));
+                $label_to_print = !empty($choices) ? "$label. Choices: " . implode($choices) : $label; 
+                $options[$option] = cli_input($label_to_print, $default, $choices, !empty($choices));
             }
         }
+        $this->options=$options;
     }
 }
 
@@ -104,31 +106,24 @@ class dbmigrate_migrate extends cli_interface {
     protected $total_rows = 0;
     protected $options = null;
     protected $page_size = 1;
-    // protected $exclude = ['files', 'analytics_indicator_calc', 'logstore_standard_log', 
-    //                       'game_cross', 'game_cryptex', 'game_hangman', 'game_millionaire', 
-    //                       'grade_grades', 'notifications', 'message_read', 
-    //                       'question_attempt_step_data', 'question_attempt_steps', 'stats_daily'];
-    // protected $exclude = ['analytics_indicator_calc', 'logstore_standard_log', 
-    //                       'game_cross', 'game_cryptex', 'game_hangman', 'game_millionaire'];
-    protected $exclude = [];
-    // protected $only_tables = null;
-    protected $only_tables = ['game', 'game_cross'];
-    protected $only_first = false;
 
     protected $help = "New Moodle database migration script.\n\nIt is strongly recommended to turn off the web server\n or enable CLI maintenance mode before starting the migration.\n\nExample:\n\$ sudo -u www-data /usr/bin/php admin/tool/dbmigrate/cli/migrate.php\n\n";
     
     public function get_option_args() {
         return array_merge(
             [
-                "prefix"=>['value'=>'PREFIX', 'label'=>['choose_dbconnector', 'dbmigrate'], 'default'=>'mdl_', 'help'=> 'Table prefix for above database tables.'],
-                "dbconnector"=>['value'=> 'CONNECTOR', 'label'=>['dbconnector', 'dbmigrate'], 'default'=>null, 'choices'=> $this->get_drivers(), 'help'=> 'Database type/library.'],
-                "dbhost"=>['value'=> 'HOST', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database host.'],
-                "dbport"=>['value'=> 'PORT', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database port.'],
-                "dbname"=>['value'=> 'DATABASE', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database name.'],
-                "dbuser"=>['value'=> 'USERNAME', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database user.'],
-                "dbpass"=>['value'=> 'PASSWORD', 'label'=>['databasetypehead', 'install'], 'help'=> 'Database password.'],
-                "maintenance"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Put Moodle on maintenance during migration.'],
-                "force"=>['label'=>['databasetypehead', 'install'], 'help'=> 'Force migration if tables already exists.'],
+                "prefix"=>['value'=>'PREFIX', 'label'=>"Type tables prefix", 'default'=>'mdl_', 'help'=> 'Table prefix for above database tables.'],
+                "dbconnector"=>['value'=> 'CONNECTOR', 'default'=>null, 'choices'=> $this->get_drivers(), 'help'=> 'Database type/library.'],
+                "dbhost"=>['value'=> 'HOST', 'help'=> 'Database host.'],
+                "dbport"=>['value'=> 'PORT', 'help'=> 'Database port.'],
+                "dbname"=>['value'=> 'DATABASE', 'help'=> 'Database name.'],
+                "dbuser"=>['value'=> 'USERNAME', 'help'=> 'Database user.'],
+                "dbpass"=>['value'=> 'PASSWORD', 'help'=> 'Database password.'],
+                "only_tables"=>['help'=> 'Restrict migration to this tables.'],
+                "exclude"=>['help'=> 'Migrate all table, exception this tables.'],
+                "page_size"=>['help'=> 'Number of lines to bulk insert.'],
+                "maintenance"=>['help'=> 'Put Moodle on maintenance during migration.'],
+                "force"=>['help'=> 'Force migration if tables already exists.'],
             ], 
             parent::get_option_args());
     }
@@ -145,7 +140,9 @@ class dbmigrate_migrate extends cli_interface {
     }
 
     function check_connection() {
-        $this->targetdb = moodle_database::get_driver_instance($this->options['dbtype'], $this->options['dblibrary']);
+        list($dbtype, $dblibrary) = explode('/', $this->options['dbconnector']);
+
+        $this->targetdb = moodle_database::get_driver_instance($dbtype, $dblibrary);
         $options = $this->options;
         $dboptions = array();
         if ($this->options['dbport']) {
@@ -155,9 +152,11 @@ class dbmigrate_migrate extends cli_interface {
             $dboptions['dbsocket'] = $this->options['dbsocket'];
         }
         try {
+            $this->page_size = !empty($this->options['page_size']) ? intval($this->options['page_size']) : 1000;
             $dboptions['bulkinsertsize'] = $this->page_size;
             $this->targetdb->connect($options['dbhost'], $options['dbuser'], $options['dbpass'], $options['dbname'], $options['prefix'], $dboptions);
             $this->target_tables = $this->targetdb->get_tables();
+            echo "Connection successful.\n\n";
         } catch (moodle_exception $e) {
             $problem = $e->debuginfo."\n\n";
             $problem .= get_string('notargetconectexception', 'tool_dbmigrate');
@@ -195,17 +194,16 @@ class dbmigrate_migrate extends cli_interface {
         global $DB, $CFG;
         if (is_null($this->tables_metas)) {
             $this->tables_metas = [];
-            $this->table_count = count($DB->get_tables());
             echo "LENDO O MODELO DAS TABELAS\n";
     
             $i = 0;
-            $tables = $this->only_tables ? $this->only_tables : $DB->get_tables();
+            $only_tables = !empty($this->options['only_tables']) ? explode(',', $this->options['only_tables']) : $DB->get_tables();
+            $exclude = !empty($this->options['exclude']) ? explode(',', $this->options['exclude']) : [];
+            $tables = array_diff($only_tables,$exclude);
+            $this->table_count = count($tables);
             foreach ($tables as $table_name) {
                 $i++;
-                if ( in_array($table_name, $this->exclude)) {
-                    continue;
-                } 
-                echo "  " . $this->cli_progress_bar($i, $this->table_count, " $i/{$this->table_count}");
+                echo "  " . $this->cli_progress_bar($i, $this->table_count, " $i/$this->table_count");
                 
                 $full_table_name = $DB->get_prefix() . $table_name;
                 $count_records = $DB->count_records($table_name);
@@ -231,7 +229,9 @@ class dbmigrate_migrate extends cli_interface {
     }
 
     function print_summary() {
+        global $DB;
         echo "\n\nSUMÁRIO\n";
+        echo "  Total de tabelas no Moolde: " . count($DB->get_tables()) . "\n";
         echo "  Total de tabelas a migrar: " . count($this->tables_metas) . "\n";
         echo "  Total de tabelas já existentes: " . count($this->tables_on_target) . "\n";
         echo "  Total de tabelas a criar: " . (count($this->tables_metas) - count($this->tables_on_target)) . "\n";
@@ -332,24 +332,13 @@ class dbmigrate_migrate extends cli_interface {
             $t++;
             $p = round(($t * 100) / $tt);
             $row_count_f = number_format($table_meta['row_count'], 0, "", ".");
+            
             for ($j=0; $j<=$table_meta['row_count']; $j+=$this->page_size) { 
                 echo "    " . $this->cli_progress_bar($j, $table_meta['row_count'], " $table_name ($p% - $t de $tt). Linhas ($migrated_in_table_f de $row_count_f)");
                 $migrated_in_table_f = number_format($j, 0, "", ".");
 
-                // $rs = $DB->get_recordset_sql("SELECT * FROM {$table_meta['full_table_name']} ORDER BY id", null, $j+1, $this->page_size);
-                // foreach ($rs as $id => $obj) {
-                //     print_r($obj);
-                // }
-                // $this->targetdb->insert_records($table_name, $rs);
-                // $rs->close();
-
-                // print_r($table_meta['columns']);
-                // die();
-
-                $rs = $DB->get_recordset_sql("SELECT * FROM {$table_meta['full_table_name']} ORDER BY id", null, $j+1, $this->page_size);
+                $rs = $DB->get_recordset($table_name, null, 'id', '*', $j+1, $this->page_size);
                 $this->targetdb->insert_records($table_name, $rs);
-                // $this->targetdb->insert_chunk($table_name, $rs);
-                die();
                 $rs->close();
             }
         }
@@ -357,7 +346,6 @@ class dbmigrate_migrate extends cli_interface {
     }
     
     function reset_sequences() {
-        $i = 0;
         $sql = "";
         echo "\nREDEFININDO AS SEQUENCES\n";
         $sql = "SELECT column_default, column_name, table_name
@@ -368,17 +356,19 @@ class dbmigrate_migrate extends cli_interface {
         AND column_default like 'nextval%'";
         $params = [$this->options['dbname'], $this->options['prefix'] . '%'];
         $rows = $this->targetdb->get_records_sql($sql, $params);
-        $tt = count($rows);
+        $i = 1;
         foreach ($rows as $column) {
-            $i++;
-            $sequence_name = substr($column->column_default, 9, -12);
-            $this->targetdb->execute("SELECT setval('$sequence_name', (select MAX({$column->column_name})+1 qtd from {$column->table_name}))");
-            echo "    " . $this->cli_progress_bar($i, $tt, " $sequence_name ($i de $tt)");
+            if (array_key_exists(substr($column->table_name, strlen($this->options['prefix'])), $this->get_tables_metas())) {
+                $i++;
+                $sequence_name = substr($column->column_default, 9, -12);
+                $this->targetdb->execute("SELECT setval('$sequence_name', (select MAX({$column->column_name})+1 qtd from {$column->table_name}))");
+                echo "    " . $this->cli_progress_bar($i, $this->table_count, " $sequence_name ($i de $this->table_count)");
+            }
         }
-        echo "  " . $this->cli_progress_bar($i, $tt, " Redefinidas ($i de $tt)."). "\n";
+        echo "  " . $this->cli_progress_bar($i, $this->table_count, " Redefinidas ($i de $this->table_count)."). "\n";
     }
 
-    function migrate() {
+    function execute() {
         try {
             $this->read_options();
             $this->check_connection();
@@ -395,4 +385,4 @@ class dbmigrate_migrate extends cli_interface {
 }
 
 $dbmigrate_migrate = new dbmigrate_migrate();
-$dbmigrate_migrate->migrate();
+$dbmigrate_migrate->execute();
